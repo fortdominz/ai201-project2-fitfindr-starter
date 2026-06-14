@@ -4,7 +4,8 @@ tests/test_tools.py
 Pytest tests for each FitFindr tool. Run with: pytest tests/
 
 Tests cover:
-  - search_listings: happy path, empty results, price filter, size filter
+  - search_listings: happy path, empty results, price filter, size filter,
+    size token matching (no cross-category bleeding), category keyword scoring
   - suggest_outfit: empty wardrobe (no exception, non-empty string)
   - create_fit_card: empty outfit guard (no exception, returns error string)
 """
@@ -55,6 +56,22 @@ def test_search_results_sorted_by_relevance():
     results = search_listings("graphic tee", size=None, max_price=50)
     # Just check we get results and no exception — ordering is score-based
     assert isinstance(results, list)
+
+
+def test_size_token_no_cross_category_bleed():
+    # Size "8" must not match listings with "8" buried inside size strings like "W28"
+    results = search_listings("jeans", size="8", max_price=None)
+    for item in results:
+        assert "8" in item["size"].split() or "US 8" in item["size"] or item["size"] == "8", (
+            f"Size '8' matched '{item['size']}' via substring — should be token-only"
+        )
+
+
+def test_category_keyword_finds_shoes():
+    # "shoes" as a search keyword should surface items in the shoes category
+    results = search_listings("shoes", size=None, max_price=None)
+    assert len(results) > 0
+    assert all(item["category"] == "shoes" for item in results)
 
 
 # ── suggest_outfit ─────────────────────────────────────────────────────────────

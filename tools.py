@@ -13,6 +13,7 @@ Tools:
 """
 
 import os
+import re
 
 from dotenv import load_dotenv
 from groq import Groq
@@ -32,6 +33,26 @@ def _get_groq_client():
             "GROQ_API_KEY not set. Add it to a .env file in the project root."
         )
     return Groq(api_key=api_key)
+
+
+# ── Size tokenizer ────────────────────────────────────────────────────────────
+
+def _size_tokens(size_str: str) -> set[str]:
+    """
+    Split a listing's size field into discrete tokens for exact matching.
+
+    Examples:
+        "S/M"                  → {"s", "m"}
+        "US 8"                 → {"us", "8"}
+        "US 8.5"               → {"us", "8.5"}
+        "W30 L30"              → {"w30", "l30"}
+        "XL (fits oversized)"  → {"xl", "fits", "oversized"}
+        "One Size (adjustable)"→ {"one", "size", "adjustable"}
+
+    This prevents "8" from matching "W28" and "s" from matching "US 9".
+    """
+    parts = re.split(r'[\s/,]+', size_str.lower())
+    return {re.sub(r'[^\w.]', '', p) for p in parts if p}
 
 
 # ── Tool 1: search_listings ───────────────────────────────────────────────────
@@ -68,21 +89,25 @@ def search_listings(
     if max_price is not None:
         listings = [l for l in listings if l["price"] <= max_price]
     if size is not None:
-        size_lower = size.strip().lower()
-        listings = [l for l in listings if size_lower in l["size"].lower()]
+        user_size = size.strip().lower()
+        listings = [l for l in listings if user_size in _size_tokens(l["size"])]
 
-    # Score by keyword overlap across title (3 pts), style_tags (2 pts), description (1 pt)
+    # Score by keyword overlap:
+    #   title (3 pts) | category (3 pts) | style_tags (2 pts) | description (1 pt)
+    # Category weight lets "shoes", "tops", etc. route queries to the right section.
     keywords = [w.lower() for w in description.split() if w]
 
     scored = []
     for listing in listings:
         title_words = listing["title"].lower().split()
+        category_words = listing["category"].lower().split()
         tags = [t.lower() for t in listing["style_tags"]]
         desc_words = listing["description"].lower().split()
 
         score = 0
         for kw in keywords:
             score += 3 * sum(1 for w in title_words if kw in w)
+            score += 3 * sum(1 for w in category_words if kw in w)
             score += 2 * sum(1 for t in tags if kw in t)
             score += 1 * sum(1 for w in desc_words if kw in w)
 
