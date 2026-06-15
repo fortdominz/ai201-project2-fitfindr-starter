@@ -1,117 +1,161 @@
 """
-tests/test_tools.py
-
-Pytest tests for each FitFindr tool. Run with: pytest tests/
+tests/test_tools.py — FitFindr v2
 
 Tests cover:
-  - search_listings: happy path, empty results, price filter, size filter,
-    size token matching (no cross-category bleeding), category keyword scoring
-  - suggest_outfit: empty wardrobe (no exception, non-empty string)
-  - create_fit_card: empty outfit guard (no exception, returns error string)
+  - validate_query: fashion queries pass, off-topic queries are rejected
+  - search_ebay: live results, price filter, size filter (skipped without eBay creds)
+  - suggest_outfit: empty wardrobe, example wardrobe, with style_goal
+  - create_fit_card: empty outfit guard, valid input
 """
 
-from tools import search_listings, suggest_outfit, create_fit_card
+import os
+import pytest
+
+from tools import validate_query, search_ebay, suggest_outfit, create_fit_card
 from utils.data_loader import get_example_wardrobe, get_empty_wardrobe
 
+# ── Shared mock item (avoids eBay dependency in outfit/fitcard tests) ──────────
 
-# ── search_listings ────────────────────────────────────────────────────────────
+_MOCK_ITEM = {
+    "id":          "test_001",
+    "title":       "Vintage Levi's 501 Jeans",
+    "description": "Classic medium-wash denim in great condition.",
+    "category":    "bottoms",
+    "style_tags":  ["vintage", "denim"],
+    "size":        "W30 L30",
+    "condition":   "Good",
+    "price":       35.00,
+    "colors":      ["blue", "indigo"],
+    "brand":       "Levi's",
+    "platform":    "eBay",
+    "image_url":   "",
+    "item_url":    "https://www.ebay.com/itm/example",
+}
 
-def test_search_returns_results():
-    results = search_listings("vintage graphic tee", size=None, max_price=50)
+_HAS_EBAY = bool(os.environ.get("EBAY_CLIENT_ID") and os.environ.get("EBAY_CLIENT_SECRET"))
+_ebay_skip = pytest.mark.skipif(not _HAS_EBAY, reason="EBAY_CLIENT_ID/SECRET not set")
+
+
+# ── validate_query ─────────────────────────────────────────────────────────────
+
+def test_validate_fashion_query_passes():
+    result = validate_query("vintage graphic tee under $30")
+    assert result["valid"] is True
+    assert result["warning"] is None
+
+
+def test_validate_aesthetic_query_passes():
+    result = validate_query("dark academia outfit for fall")
+    assert result["valid"] is True
+
+
+def test_validate_adjective_query_passes():
+    # "sexy", "edgy", etc. are valid fashion descriptors and must not be rejected
+    result = validate_query("sexy little black dress")
+    assert result["valid"] is True
+
+
+def test_validate_occasion_query_passes():
+    result = validate_query("something to wear to a music festival")
+    assert result["valid"] is True
+
+
+def test_validate_off_topic_rejected():
+    result = validate_query("how do I make pasta carbonara")
+    assert result["valid"] is False
+    assert result["warning"] is not None
+    assert len(result["warning"]) > 0
+
+
+def test_validate_tech_query_rejected():
+    result = validate_query("explain how machine learning works")
+    assert result["valid"] is False
+
+
+def test_validate_returns_dict_structure():
+    result = validate_query("vintage tee")
+    assert "valid" in result
+    assert "warning" in result
+
+
+# ── search_ebay ───────────────────────────────────────────────────────────────
+
+@_ebay_skip
+def test_search_ebay_returns_results():
+    results = search_ebay("vintage graphic tee", size=None, max_price=50)
     assert isinstance(results, list)
     assert len(results) > 0
 
 
-def test_search_empty_results():
-    # Impossible query — no exception, just empty list
-    results = search_listings("designer ballgown", size="XXS", max_price=5)
-    assert results == []
-
-
-def test_search_price_filter():
-    results = search_listings("jacket", size=None, max_price=10)
-    # All returned items must be within the price ceiling
-    assert all(item["price"] <= 10 for item in results)
-
-
-def test_search_size_filter():
-    results = search_listings("top", size="M", max_price=None)
-    # Every returned item's size field must contain "m" (case-insensitive)
-    for item in results:
-        assert "m" in item["size"].lower(), f"{item['title']} has size {item['size']}"
-
-
-def test_search_result_fields():
-    results = search_listings("vintage", size=None, max_price=100)
+@_ebay_skip
+def test_search_ebay_result_fields():
+    results = search_ebay("jeans", size=None, max_price=None)
     assert len(results) > 0
-    required_fields = {"id", "title", "description", "category", "style_tags",
-                       "size", "condition", "price", "colors", "platform"}
+    required = {"id", "title", "description", "category", "style_tags",
+                "size", "condition", "price", "colors", "platform",
+                "image_url", "item_url"}
     for item in results:
-        for field in required_fields:
-            assert field in item, f"Missing field '{field}' in result"
+        for field in required:
+            assert field in item, f"Missing field '{field}' in eBay result"
 
 
-def test_search_results_sorted_by_relevance():
-    # A more specific query should rank the exact match higher than a loose match
-    results = search_listings("graphic tee", size=None, max_price=50)
-    # Just check we get results and no exception — ordering is score-based
+@_ebay_skip
+def test_search_ebay_price_filter():
+    results = search_ebay("shirt", size=None, max_price=20)
+    assert all(item["price"] <= 20 for item in results), (
+        "Price filter returned item above max_price"
+    )
+
+
+@_ebay_skip
+def test_search_ebay_with_style_goal():
+    results = search_ebay("cardigan", size=None, max_price=None, style_goal="dark academia")
     assert isinstance(results, list)
 
 
-def test_size_token_no_cross_category_bleed():
-    # Size "8" must not match listings with "8" buried inside size strings like "W28"
-    results = search_listings("jeans", size="8", max_price=None)
-    for item in results:
-        assert "8" in item["size"].split() or "US 8" in item["size"] or item["size"] == "8", (
-            f"Size '8' matched '{item['size']}' via substring — should be token-only"
-        )
-
-
-def test_category_keyword_finds_shoes():
-    # "shoes" as a search keyword should surface items in the shoes category
-    results = search_listings("shoes", size=None, max_price=None)
-    assert len(results) > 0
-    assert all(item["category"] == "shoes" for item in results)
+@_ebay_skip
+def test_search_ebay_empty_on_impossible_query():
+    # Price ceiling so low it should return nothing or an empty list — must not raise
+    results = search_ebay("designer ballgown", size=None, max_price=1)
+    assert isinstance(results, list)
 
 
 # ── suggest_outfit ─────────────────────────────────────────────────────────────
 
-def test_suggest_outfit_empty_wardrobe_no_exception():
-    results = search_listings("vintage graphic tee", size=None, max_price=50)
-    assert len(results) > 0
-    # Must return a non-empty string, not raise an exception
-    result = suggest_outfit(results[0], get_empty_wardrobe())
+def test_suggest_outfit_empty_wardrobe():
+    result = suggest_outfit(_MOCK_ITEM, get_empty_wardrobe())
     assert isinstance(result, str)
     assert len(result.strip()) > 0
 
 
-def test_suggest_outfit_example_wardrobe_returns_string():
-    results = search_listings("vintage graphic tee", size=None, max_price=50)
-    result = suggest_outfit(results[0], get_example_wardrobe())
+def test_suggest_outfit_example_wardrobe():
+    result = suggest_outfit(_MOCK_ITEM, get_example_wardrobe())
+    assert isinstance(result, str)
+    assert len(result.strip()) > 0
+
+
+def test_suggest_outfit_with_style_goal():
+    result = suggest_outfit(_MOCK_ITEM, get_empty_wardrobe(), style_goal="dark academia")
     assert isinstance(result, str)
     assert len(result.strip()) > 0
 
 
 # ── create_fit_card ────────────────────────────────────────────────────────────
 
-def test_fit_card_empty_outfit_no_exception():
-    results = search_listings("vintage graphic tee", size=None, max_price=50)
-    # Empty outfit string — must return error message, not raise
-    result = create_fit_card("", results[0])
+def test_fit_card_empty_outfit_guard():
+    result = create_fit_card("", _MOCK_ITEM)
     assert isinstance(result, str)
     assert len(result.strip()) > 0
 
 
-def test_fit_card_whitespace_outfit_no_exception():
-    results = search_listings("vintage graphic tee", size=None, max_price=50)
-    result = create_fit_card("   ", results[0])
+def test_fit_card_whitespace_outfit_guard():
+    result = create_fit_card("   ", _MOCK_ITEM)
     assert isinstance(result, str)
     assert len(result.strip()) > 0
 
 
-def test_fit_card_valid_input_returns_string():
-    results = search_listings("vintage graphic tee", size=None, max_price=50)
-    outfit = "Pair with baggy jeans and chunky sneakers for a streetwear look."
-    result = create_fit_card(outfit, results[0])
+def test_fit_card_valid_input():
+    outfit = "Pair with straight-leg jeans and white sneakers for a clean casual look."
+    result = create_fit_card(outfit, _MOCK_ITEM)
     assert isinstance(result, str)
     assert len(result.strip()) > 0

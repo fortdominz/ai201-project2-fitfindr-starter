@@ -1,21 +1,14 @@
 """
-agent.py
+agent.py — FitFindr v2
 
-The FitFindr planning loop. Orchestrates the three tools in response to a
-natural language user query, passing state between them via a session dict.
-
-Complete tools.py and test each tool in isolation before implementing this file.
-
-Usage (once implemented):
-    from agent import run_agent
-    from utils.data_loader import get_example_wardrobe
-
-    result = run_agent(
-        query="vintage graphic tee under $30, size M",
-        wardrobe=get_example_wardrobe(),
-    )
-    print(result["fit_card"])
-    print(result["error"])   # None on success
+Planning loop:
+    1. Validate query (reject off-topic, allow fashion adjectives)
+    2. Parse natural language → description, size, max_price
+    3. Search eBay for real secondhand listings
+    4. Early exit if no results
+    5. Suggest outfits (incorporating style_goal if given)
+    6. Generate fit card
+    7. Return session dict
 """
 
 import json
@@ -25,25 +18,28 @@ import re
 from dotenv import load_dotenv
 from groq import Groq
 
-from tools import search_listings, suggest_outfit, create_fit_card
+from tools import validate_query, search_ebay, suggest_outfit, create_fit_card
 
 load_dotenv()
 
 
-def _parse_query(query: str) -> dict:
+# ── Query parser ──────────────────────────────────────────────────────────────
+
+def _parse_query(query: str, style_goal: str | None = None) -> dict:
     """
-    Use the Groq LLM to extract description, size, and max_price from a natural
-    language query. Falls back to the full query as description if parsing fails.
+    Use LLM to extract description, size, and max_price from natural language.
+    style_goal is mentioned in context so the LLM can disambiguate clothing intent.
     """
     try:
         client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+        style_context = f"\nStyle goal: {style_goal}" if style_goal else ""
         prompt = (
-            "Extract the following fields from this clothing search query. "
+            "Extract structured search parameters from this clothing query.\n"
+            f'Query: "{query}"{style_context}\n\n'
             "Return ONLY a JSON object with these exact keys:\n"
             '  "description": the item type and style keywords (str)\n'
             '  "size": the size if mentioned, otherwise null\n'
             '  "max_price": the maximum price as a float if mentioned, otherwise null\n\n'
-            f'Query: "{query}"\n\n'
             "Return only the JSON object, no explanation."
         )
         response = client.chat.completions.create(
@@ -53,152 +49,133 @@ def _parse_query(query: str) -> dict:
             max_tokens=100,
         )
         raw = response.choices[0].message.content.strip()
-        # Strip any markdown code fences if present
-        raw = re.sub(r"```(?:json)?", "", raw).strip().rstrip("```").strip()
+        raw = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
         parsed = json.loads(raw)
         return {
             "description": parsed.get("description") or query,
-            "size": parsed.get("size"),
-            "max_price": parsed.get("max_price"),
+            "size":        parsed.get("size"),
+            "max_price":   parsed.get("max_price"),
         }
     except Exception:
-        # Fallback: treat the whole query as the description
         return {"description": query, "size": None, "max_price": None}
 
 
-# ── session state ─────────────────────────────────────────────────────────────
+# ── Session state ─────────────────────────────────────────────────────────────
 
-def _new_session(query: str, wardrobe: dict) -> dict:
-    """
-    Initialize and return a fresh session dict for one user interaction.
-
-    The session dict is the single source of truth for everything that happens
-    during a run — it stores the original query, parsed parameters, tool results,
-    and any error that caused early termination.
-
-    You may add fields to this dict as needed for your implementation.
-    """
+def _new_session(query: str, wardrobe: dict, style_goal: str | None) -> dict:
     return {
-        "query": query,              # original user query
-        "parsed": {},                # extracted description / size / max_price
-        "search_results": [],        # list of matching listing dicts
-        "selected_item": None,       # top result, passed into suggest_outfit
-        "wardrobe": wardrobe,        # user's wardrobe dict
-        "outfit_suggestion": None,   # string returned by suggest_outfit
-        "fit_card": None,            # string returned by create_fit_card
-        "error": None,               # set if the interaction ended early
+        "query":              query,
+        "style_goal":         style_goal,
+        "parsed":             {},
+        "search_results":     [],
+        "selected_item":      None,
+        "wardrobe":           wardrobe,
+        "outfit_suggestion":  None,
+        "fit_card":           None,
+        "error":              None,   # fatal — stops the pipeline
+        "warning":            None,   # non-fatal info shown to the user
     }
 
 
-# ── planning loop ─────────────────────────────────────────────────────────────
+# ── Planning loop ─────────────────────────────────────────────────────────────
 
-def run_agent(query: str, wardrobe: dict) -> dict:
+def run_agent(
+    query: str,
+    wardrobe: dict,
+    style_goal: str | None = None,
+) -> dict:
     """
-    Main agent entry point. Runs the FitFindr planning loop for a single
-    user interaction and returns the completed session dict.
+    Main entry point for a single FitFindr interaction.
 
     Args:
-        query:    Natural language user request
-                  (e.g., "vintage graphic tee under $30, size M")
-        wardrobe: User's wardrobe dict — use get_example_wardrobe() or
-                  get_empty_wardrobe() from utils/data_loader.py
+        query:      Natural language user request.
+        wardrobe:   Wardrobe dict (get_example_wardrobe or get_empty_wardrobe).
+        style_goal: Optional aesthetic goal, e.g. "dark academia", "y2k streetwear".
 
     Returns:
-        The session dict after the interaction completes. Check session["error"]
-        first — if it is not None, the interaction ended early and the other
-        output fields (outfit_suggestion, fit_card) will be None.
-
-    TODO — implement this function using the planning loop you designed in planning.md:
-
-        Step 1: Initialize the session with _new_session().
-
-        Step 2: Parse the user's query to extract a description, size, and
-                max_price. You can use regex, string splitting, or ask the LLM
-                to parse it — document your choice in planning.md.
-                Store the result in session["parsed"].
-
-        Step 3: Call search_listings() with the parsed parameters.
-                Store results in session["search_results"].
-                If no results: set session["error"] to a helpful message and
-                return the session early. Do NOT proceed to suggest_outfit
-                with empty input.
-
-        Step 4: Select the item to use (e.g., the top result).
-                Store it in session["selected_item"].
-
-        Step 5: Call suggest_outfit() with the selected item and wardrobe.
-                Store the result in session["outfit_suggestion"].
-
-        Step 6: Call create_fit_card() with the outfit suggestion and selected item.
-                Store the result in session["fit_card"].
-
-        Step 7: Return the session.
-
-    Before writing code, complete the Planning Loop and State Management sections
-    of planning.md — your implementation should match what you described there.
+        Session dict. Check session["error"] first — if not None, the pipeline
+        stopped early. session["warning"] is non-fatal (query was borderline valid).
     """
-    # Step 1: Initialize session
-    session = _new_session(query, wardrobe)
+    session = _new_session(query, wardrobe, style_goal)
 
-    # Step 2: Parse the query to extract description, size, max_price
-    session["parsed"] = _parse_query(query)
-
-    # Step 3: Search listings — branch on results
-    session["search_results"] = search_listings(
-        description=session["parsed"]["description"],
-        size=session["parsed"]["size"],
-        max_price=session["parsed"]["max_price"],
-    )
-
-    if not session["search_results"]:
-        desc = session["parsed"]["description"]
-        size_hint = f", size {session['parsed']['size']}" if session["parsed"]["size"] else ""
-        price_hint = f" under ${session['parsed']['max_price']:.0f}" if session["parsed"]["max_price"] else ""
+    # ── Step 1: Validate query ────────────────────────────────────────────────
+    validation = validate_query(query)
+    if not validation["valid"]:
         session["error"] = (
-            f"No listings found for '{desc}'{size_hint}{price_hint}. "
-            "Try a broader description, raise your price limit, or remove the size filter."
+            f"FitFindr searches secondhand clothing — your query doesn't look fashion-related. "
+            f"{validation.get('warning', '')} "
+            "Try searching for a clothing item, style aesthetic, or occasion."
         )
         return session
 
-    # Step 4: Select the top result
+    # ── Step 2: Parse query ───────────────────────────────────────────────────
+    session["parsed"] = _parse_query(query, style_goal)
+
+    # ── Step 3: Search eBay ───────────────────────────────────────────────────
+    try:
+        session["search_results"] = search_ebay(
+            description=session["parsed"]["description"],
+            size=session["parsed"]["size"],
+            max_price=session["parsed"]["max_price"],
+            style_goal=style_goal,
+        )
+    except RuntimeError as e:
+        session["error"] = str(e)
+        return session
+
+    if not session["search_results"]:
+        desc       = session["parsed"]["description"]
+        size_hint  = f", size {session['parsed']['size']}" if session["parsed"]["size"] else ""
+        price_hint = (
+            f" under ${session['parsed']['max_price']:.0f}"
+            if session["parsed"]["max_price"] else ""
+        )
+        session["error"] = (
+            f"No secondhand listings found for '{desc}'{size_hint}{price_hint}. "
+            "Try different keywords, raise the price limit, or remove the size filter."
+        )
+        return session
+
+    # ── Step 4: Select top result ─────────────────────────────────────────────
     session["selected_item"] = session["search_results"][0]
 
-    # Step 5: Suggest outfit
+    # ── Step 5: Suggest outfit ────────────────────────────────────────────────
     session["outfit_suggestion"] = suggest_outfit(
         new_item=session["selected_item"],
         wardrobe=session["wardrobe"],
+        style_goal=style_goal,
     )
 
-    # Step 6: Generate fit card
+    # ── Step 6: Generate fit card ─────────────────────────────────────────────
     session["fit_card"] = create_fit_card(
         outfit=session["outfit_suggestion"],
         new_item=session["selected_item"],
     )
 
-    # Step 7: Return completed session
     return session
 
 
 # ── CLI test ──────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    from utils.data_loader import get_example_wardrobe, get_empty_wardrobe
+    from utils.data_loader import get_example_wardrobe
 
-    print("=== Happy path: graphic tee ===\n")
+    print("=== Happy path: vintage tee ===\n")
     session = run_agent(
-        query="looking for a vintage graphic tee under $30",
+        query="vintage graphic tee under $40",
         wardrobe=get_example_wardrobe(),
+        style_goal="90s streetwear",
     )
     if session["error"]:
         print(f"Error: {session['error']}")
     else:
-        print(f"Found: {session['selected_item']['title']}")
-        print(f"\nOutfit: {session['outfit_suggestion']}")
-        print(f"\nFit card: {session['fit_card']}")
+        item = session["selected_item"]
+        print(f"Found: {item['title']} — ${item['price']:.2f}")
+        print(f"Image: {item.get('image_url', 'n/a')}")
+        print(f"Link:  {item.get('item_url', 'n/a')}")
+        print(f"\nOutfit:\n{session['outfit_suggestion']}")
+        print(f"\nFit card:\n{session['fit_card']}")
 
-    print("\n\n=== No-results path ===\n")
-    session2 = run_agent(
-        query="designer ballgown size XXS under $5",
-        wardrobe=get_example_wardrobe(),
-    )
-    print(f"Error message: {session2['error']}")
+    print("\n\n=== Off-topic query rejection ===\n")
+    session2 = run_agent(query="how do I make pasta carbonara", wardrobe=get_example_wardrobe())
+    print(f"Error: {session2['error']}")
