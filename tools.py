@@ -229,6 +229,7 @@ def _generate_ebay_keywords(description: str, style_goal: str | None) -> str:
 def search_ebay(
     description: str,
     size: str | None = None,
+    min_price: float | None = None,
     max_price: float | None = None,
     style_goal: str | None = None,
 ) -> list[dict]:
@@ -238,6 +239,7 @@ def search_ebay(
     Args:
         description: Natural-language item description.
         size:        Size string to filter by, or None. Applied post-fetch.
+        min_price:   Minimum price inclusive, or None.
         max_price:   Maximum price inclusive, or None.
         style_goal:  Optional aesthetic goal to enrich eBay keywords.
 
@@ -254,15 +256,17 @@ def search_ebay(
         "conditions:{LIKE_NEW|VERY_GOOD|GOOD|ACCEPTABLE|USED}",
         "itemLocationCountry:US",
     ]
-    if max_price is not None:
-        filter_parts.append(f"price:[0..{max_price:.2f}]")
+    if min_price is not None or max_price is not None:
+        lo = f"{(min_price or 0):.2f}"
+        hi = f"{(max_price or 99999):.2f}"
+        filter_parts.append(f"price:[{lo}..{hi}]")
         filter_parts.append("priceCurrency:USD")
 
     params: dict = {
         "q":            keywords,
         "category_ids": "11450",   # Clothing, Shoes & Accessories
         "filter":       ",".join(filter_parts),
-        "limit":        "20",
+        "limit":        "50",
         "sort":         "bestMatch",
     }
 
@@ -293,7 +297,7 @@ def search_ebay(
 
     # Post-filter by size (aspect filters are unreliable across eBay categories)
     if size:
-        user_size = size.strip().lower()
+        user_size = str(size).strip().lower()
         by_size = [
             item for item in normalized
             if item["size"] != "Not listed" and user_size in item["size"].lower()
@@ -301,7 +305,7 @@ def search_ebay(
         if by_size:
             normalized = by_size
 
-    return normalized[:5]
+    return normalized
 
 
 # ── Tool 2: suggest_outfit ────────────────────────────────────────────────────

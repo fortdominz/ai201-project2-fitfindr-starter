@@ -13,8 +13,11 @@ import re
 import gradio as gr
 
 from agent import run_agent
+from tools import suggest_outfit, create_fit_card
 from utils.data_loader import get_example_wardrobe, get_empty_wardrobe
 import html as _html
+
+PAGE_SIZE = 10  # pills shown per "interval" in the result nav
 
 
 # ── Gradio base theme ─────────────────────────────────────────────────────────
@@ -197,6 +200,30 @@ body.ff-light #ff-theme-btn button:hover::after { color: #1C1C1A !important; }
     box-shadow: 0 10px 28px rgba(244,162,97,0.22) !important;
 }
 #ff-submit button:active { transform: translateY(0) !important; }
+
+/* ── "view more results" pill button ── */
+#ff-more-btn { padding: 0 20px !important; background: transparent !important; border: none !important; box-shadow: none !important; }
+#ff-more-btn button {
+    font-family: 'Inter', sans-serif !important;
+    font-size: 0.65rem !important;
+    font-weight: 700 !important;
+    letter-spacing: 0.10em !important;
+    text-transform: uppercase !important;
+    padding: 7px 16px !important;
+    border-radius: 100px !important;
+    background: #F0EDE8 !important;
+    border: 1px solid #F0EDE8 !important;
+    color: #0A0A0A !important;
+    cursor: pointer !important;
+    transition: background 0.15s, border-color 0.15s, color 0.15s !important;
+    height: auto !important;
+    min-height: unset !important;
+}
+#ff-more-btn button:hover {
+    background: #F4A261 !important;
+    border-color: #F4A261 !important;
+    color: #0A0A0A !important;
+}
 
 /* ── output cards ── */
 .output-card {
@@ -606,25 +633,54 @@ body.ff-light .gradio-container .label-wrap span { color: #BBBBBB !important; }
     margin: 0;
 }
 
-/* ── listing card (v2 HTML card — replaces prose markdown) ── */
+/* ── listing card ── */
 .listing-card {
     display: flex;
     flex-direction: column;
     gap: 12px;
-    padding: 10px 20px 20px;
+    padding: 10px 20px 16px;
+}
+.listing-img-wrap {
+    position: relative;
+    width: 100%;
+    overflow: hidden;
+    border-radius: 12px;
+    background: #1A1A1A;
 }
 .listing-img {
     width: 100%;
-    border-radius: 12px;
     object-fit: cover;
-    max-height: 180px;
-    background: #1A1A1A;
+    max-height: 220px;
     display: block;
+}
+.listing-cond-badge {
+    position: absolute;
+    bottom: 9px;
+    left: 10px;
+    font-family: 'Inter', sans-serif;
+    font-size: 0.58rem;
+    font-weight: 700;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    padding: 3px 9px;
+    border-radius: 100px;
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+}
+.listing-cond-excellent {
+    background: rgba(244,162,97,0.15);
+    border: 1px solid rgba(244,162,97,0.30);
+    color: #F4A261;
+}
+.listing-cond-good {
+    background: rgba(255,255,255,0.07);
+    border: 1px solid rgba(255,255,255,0.13);
+    color: #6A6A64;
 }
 .listing-body { display: flex; flex-direction: column; gap: 5px; }
 .listing-title {
     font-family: 'Playfair Display', serif;
-    font-size: 1.05rem;
+    font-size: 1.08rem;
     font-weight: 700;
     font-style: italic;
     color: #EDEAE4;
@@ -643,7 +699,7 @@ body.ff-light .gradio-container .label-wrap span { color: #BBBBBB !important; }
     gap: 5px;
     transition: color 0.3s;
 }
-.listing-price { color: #F4A261 !important; font-weight: 700; }
+.listing-price { color: #F4A261 !important; font-weight: 700; font-size: 0.9rem; }
 .listing-sep { color: #282828; }
 .listing-colors {
     font-family: 'Inter', sans-serif;
@@ -675,28 +731,173 @@ body.ff-light .gradio-container .label-wrap span { color: #BBBBBB !important; }
     letter-spacing: 0.03em;
 }
 .listing-buy {
-    display: inline-block;
-    margin-top: 12px;
-    padding: 8px 20px;
+    display: block;
+    margin-top: 14px;
+    padding: 11px 20px;
     background: #F4A261;
     color: #0A0A0A;
-    border-radius: 8px;
+    border-radius: 10px;
     font-family: 'Inter', sans-serif;
     font-size: 0.72rem;
     font-weight: 700;
-    letter-spacing: 0.08em;
+    letter-spacing: 0.10em;
     text-decoration: none;
     text-transform: uppercase;
-    transition: background 0.2s;
+    text-align: center;
+    transition: background 0.2s, box-shadow 0.2s;
     cursor: pointer;
 }
-.listing-buy:hover { background: #E8935A; }
+.listing-buy:hover {
+    background: #E8935A;
+    box-shadow: 0 6px 20px rgba(244,162,97,0.18);
+}
 .listing-error {
     padding: 16px 20px;
     color: #555550;
     font-family: 'Inter', sans-serif;
     font-size: 0.875rem;
     line-height: 1.7;
+}
+
+/* ── more results strip ── */
+.listing-more {
+    border-top: 1px solid rgba(255,255,255,0.05);
+    padding-top: 10px;
+}
+.listing-more-label {
+    font-family: 'Inter', sans-serif;
+    font-size: 0.57rem;
+    font-weight: 700;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: #2A2A2A;
+    display: block;
+    margin-bottom: 4px;
+    padding: 0 20px;
+}
+.listing-more-items { display: flex; flex-direction: column; }
+.listing-more-item {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    padding: 8px 20px;
+    text-decoration: none;
+    transition: background 0.13s;
+}
+.listing-more-item:hover { background: rgba(255,255,255,0.028); }
+.listing-more-thumb {
+    width: 46px;
+    height: 46px;
+    border-radius: 8px;
+    object-fit: cover;
+    background: #1A1A1A;
+    flex-shrink: 0;
+    display: block;
+}
+.listing-more-info { flex: 1; overflow: hidden; display: flex; flex-direction: column; gap: 2px; }
+.listing-more-title {
+    font-family: 'Inter', sans-serif;
+    font-size: 0.775rem;
+    color: #555550;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: block;
+    line-height: 1.3;
+    transition: color 0.13s;
+}
+.listing-more-meta {
+    font-family: 'Inter', sans-serif;
+    font-size: 0.68rem;
+    color: #3A3A38;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+.listing-more-price { color: #F4A261; font-weight: 700; }
+.listing-more-dot { color: #222222; }
+.listing-more-cond { color: #2E2E2C; }
+.listing-more-arrow {
+    font-size: 0.65rem;
+    color: #282828;
+    flex-shrink: 0;
+    transition: color 0.13s, transform 0.13s;
+}
+.listing-more-item:hover .listing-more-title { color: #888880; }
+.listing-more-item:hover .listing-more-arrow { color: #F4A261; transform: translateX(3px); }
+
+/* ── result number nav pills ── */
+#ff-result-nav { padding: 4px 20px 0 !important; background: transparent !important; border: none !important; box-shadow: none !important; }
+#ff-result-nav fieldset { border: none !important; padding: 0 !important; margin: 0 !important; background: transparent !important; }
+#ff-result-nav .wrap { display: flex !important; flex-direction: row !important; gap: 6px !important; flex-wrap: wrap !important; background: transparent !important; }
+#ff-result-nav input[type="radio"] { position: absolute !important; opacity: 0 !important; width: 0 !important; height: 0 !important; pointer-events: none !important; }
+#ff-result-nav label {
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: 26px !important;
+    height: 26px !important;
+    border-radius: 50% !important;
+    border: 1px solid rgba(255,255,255,0.09) !important;
+    background: #181818 !important;
+    cursor: pointer !important;
+    font-family: 'Inter', sans-serif !important;
+    font-size: 0.68rem !important;
+    font-weight: 700 !important;
+    color: #3A3A3A !important;
+    transition: all 0.15s !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    user-select: none !important;
+}
+#ff-result-nav label:hover { border-color: rgba(244,162,97,0.28) !important; color: #888880 !important; }
+#ff-result-nav label:has(input[type="radio"]:checked) {
+    background: rgba(244,162,97,0.12) !important;
+    border-color: rgba(244,162,97,0.42) !important;
+    color: #F4A261 !important;
+}
+/* Gradio's built-in per-component "processing | Xs" status tracker can get
+   visually stuck on Radio components after the request completes (a known
+   Gradio quirk), overlapping the pills and blocking clicks. The listing/
+   outfit/fitcard panels already convey loading state on their own, so this
+   redundant tracker is suppressed entirely rather than chased with color fixes. */
+#ff-result-nav .eta-bar,
+#ff-result-nav .progress-text,
+#ff-more-btn .eta-bar,
+#ff-more-btn .progress-text {
+    display: none !important;
+}
+
+/* ── price range inputs ── */
+#ff-price-row { margin-top: 10px !important; }
+#ff-min-price label > span, #ff-max-price label > span {
+    font-family: 'Inter', sans-serif !important;
+    font-size: 0.63rem !important;
+    font-weight: 600 !important;
+    letter-spacing: 0.12em !important;
+    text-transform: uppercase !important;
+    color: #2A2A2A !important;
+}
+#ff-min-price input, #ff-max-price input {
+    font-family: 'Inter', sans-serif !important;
+    background: #141414 !important;
+    color: #F0EDE8 !important;
+    border-color: rgba(255,255,255,0.05) !important;
+    border-radius: 10px !important;
+    font-size: 0.875rem !important;
+    transition: background 0.3s, color 0.3s, border-color 0.2s !important;
+}
+
+/* ── results count ── */
+#ff-count { min-height: 0 !important; }
+.ff-count {
+    font-family: 'Inter', sans-serif;
+    font-size: 0.72rem;
+    color: #3A3A3A;
+    text-align: center;
+    padding: 6px 0;
+    letter-spacing: 0.10em;
+    text-transform: uppercase;
 }
 
 /* light mode — new elements */
@@ -728,6 +929,69 @@ body.ff-light .listing-tag {
 body.ff-light .listing-buy { background: #C96522 !important; color: #FFFFFF !important; }
 body.ff-light .listing-buy:hover { background: #A85218 !important; }
 body.ff-light .listing-error { color: #888888 !important; }
+
+/* light mode — price range + count */
+body.ff-light #ff-min-price label > span,
+body.ff-light #ff-max-price label > span { color: #AAAAAA !important; }
+body.ff-light #ff-min-price input,
+body.ff-light #ff-max-price input {
+    background: #FFFFFF !important;
+    color: #1C1C1A !important;
+    border-color: rgba(0,0,0,0.06) !important;
+}
+body.ff-light .ff-count { color: #BBBBBB !important; }
+
+/* light mode — more results + condition badge */
+body.ff-light .listing-more { border-top-color: rgba(0,0,0,0.06) !important; }
+body.ff-light .listing-more-label { color: #CCCCCC !important; }
+body.ff-light .listing-more-item:hover { background: rgba(0,0,0,0.02) !important; }
+body.ff-light .listing-more-thumb { background: #E8E4DC !important; }
+body.ff-light .listing-more-title { color: #888888 !important; }
+body.ff-light .listing-more-meta { color: #CCCCCC !important; }
+body.ff-light .listing-more-price { color: #C96522 !important; }
+body.ff-light .listing-more-dot { color: #DDDDDD !important; }
+body.ff-light .listing-more-cond { color: #CCCCCC !important; }
+body.ff-light .listing-more-arrow { color: #CCCCCC !important; }
+body.ff-light .listing-more-item:hover .listing-more-title { color: #555555 !important; }
+body.ff-light .listing-more-item:hover .listing-more-arrow { color: #C96522 !important; }
+body.ff-light .listing-cond-excellent {
+    background: rgba(201,101,34,0.08) !important;
+    border-color: rgba(201,101,34,0.22) !important;
+    color: #C96522 !important;
+}
+body.ff-light .listing-cond-good {
+    background: rgba(0,0,0,0.04) !important;
+    border-color: rgba(0,0,0,0.09) !important;
+    color: #AAAAAA !important;
+}
+
+/* light mode — more button */
+body.ff-light #ff-more-btn button {
+    background: #1C1C1A !important;
+    border-color: #1C1C1A !important;
+    color: #FFFFFF !important;
+}
+body.ff-light #ff-more-btn button:hover {
+    background: #C96522 !important;
+    border-color: #C96522 !important;
+    color: #FFFFFF !important;
+}
+
+/* light mode — result nav pills */
+body.ff-light #ff-result-nav label {
+    background: #F0ECE4 !important;
+    border-color: rgba(0,0,0,0.09) !important;
+    color: #BBBBBB !important;
+}
+body.ff-light #ff-result-nav label:hover {
+    border-color: rgba(201,101,34,0.28) !important;
+    color: #888880 !important;
+}
+body.ff-light #ff-result-nav label:has(input[type="radio"]:checked) {
+    background: rgba(201,101,34,0.10) !important;
+    border-color: rgba(201,101,34,0.40) !important;
+    color: #C96522 !important;
+}
 """
 
 # ── JS ────────────────────────────────────────────────────────────────────────
@@ -836,7 +1100,7 @@ def _format_outfit_html(outfit_text: str) -> str:
 # ── Listing HTML renderer ─────────────────────────────────────────────────────
 
 def _format_listing_html(item: dict) -> str:
-    """Render a normalized listing dict as a styled HTML card with image and buy link."""
+    """Render a normalized listing dict as the featured card (image + details + buy button)."""
     title     = _html.escape(item.get("title", ""))
     price     = item.get("price", 0)
     platform  = item.get("platform", "eBay")
@@ -848,14 +1112,25 @@ def _format_listing_html(item: dict) -> str:
     image_url = item.get("image_url", "")
     item_url  = item.get("item_url", "")
 
-    # Don't show description if empty or identical to title
     show_desc = desc and desc.strip().lower() != title.strip().lower()
 
-    img_html = (
-        f'<img src="{_html.escape(image_url)}" alt="{title}" class="listing-img" '
-        f'onerror="this.style.display=\'none\'" />'
-        if image_url else ""
-    )
+    # Condition badge class
+    cond_lower = condition.lower()
+    if any(k in cond_lower for k in ("like new", "excellent", "very good")):
+        cond_cls = "listing-cond-excellent"
+    else:
+        cond_cls = "listing-cond-good"
+
+    img_html = ""
+    if image_url:
+        img_html = (
+            f'<div class="listing-img-wrap">'
+            f'<img src="{_html.escape(image_url)}" alt="{title}" class="listing-img" '
+            f'onerror="this.parentElement.style.display=\'none\'" />'
+            + (f'<span class="listing-cond-badge {cond_cls}">{_html.escape(condition)}</span>' if condition else "")
+            + '</div>'
+        )
+
     size_html = (
         f'<span class="listing-sep">·</span><span>Size {_html.escape(size)}</span>'
         if size and size != "Not listed" else ""
@@ -880,7 +1155,6 @@ def _format_listing_html(item: dict) -> str:
       <strong class="listing-price">${price:.2f}</strong>
       <span class="listing-sep">·</span><span>{_html.escape(platform)}</span>
       {size_html}
-      <span class="listing-sep">·</span><span>{_html.escape(condition)}</span>
     </p>
     {colors_html}
     <hr class="listing-hr" />
@@ -892,16 +1166,111 @@ def _format_listing_html(item: dict) -> str:
 """
 
 
+def _format_results_html(items: list[dict]) -> str:
+    """Featured card for result #1 + compact clickable rows for results 2-5."""
+    if not items:
+        return ""
+    featured = _format_listing_html(items[0])
+    if len(items) == 1:
+        return featured
+
+    rows = ""
+    for item in items[1:]:
+        t     = _html.escape(item.get("title", ""))
+        short = t[:50] + ("…" if len(t) > 50 else "")
+        price = item.get("price", 0)
+        cond  = _html.escape(item.get("condition", ""))
+        url   = _html.escape(item.get("item_url", ""))
+        img   = _html.escape(item.get("image_url", ""))
+
+        thumb = (
+            f'<img src="{img}" alt="" class="listing-more-thumb" '
+            f'onerror="this.style.display=\'none\'" />'
+            if img else '<div class="listing-more-thumb"></div>'
+        )
+        rows += (
+            f'<a href="{url}" target="_blank" rel="noopener noreferrer" class="listing-more-item">'
+            f'{thumb}'
+            f'<div class="listing-more-info">'
+            f'<span class="listing-more-title">{short}</span>'
+            f'<span class="listing-more-meta">'
+            f'<span class="listing-more-price">${price:.2f}</span>'
+            f'<span class="listing-more-dot">·</span>'
+            f'<span class="listing-more-cond">{cond}</span>'
+            f'</span>'
+            f'</div>'
+            f'<span class="listing-more-arrow">&#8594;</span>'
+            f'</a>'
+        )
+
+    return (
+        featured
+        + '<div class="listing-more">'
+        + '<span class="listing-more-label">More on eBay</span>'
+        + f'<div class="listing-more-items">{rows}</div>'
+        + '</div>'
+    )
+
+
+# ── Result switcher (called when user clicks a nav pill) ─────────────────────
+
+def switch_result(idx_str: str, results: list, wardrobe_choice: str, style_goal: str):
+    """Re-render listing + regenerate outfit + fit card for a selected result index."""
+    if not idx_str or not results:
+        return "", "", ""
+    try:
+        idx  = int(idx_str) - 1
+        item = results[idx]
+    except (ValueError, IndexError):
+        return "", "", ""
+    wardrobe   = get_example_wardrobe() if wardrobe_choice == "Demo wardrobe" else get_empty_wardrobe()
+    clean_goal = style_goal.strip() if style_goal and style_goal.strip() else None
+    outfit  = suggest_outfit(item, wardrobe, style_goal=clean_goal)
+    fitcard = create_fit_card(outfit, item)
+    return _format_listing_html(item), _format_outfit_html(outfit), fitcard
+
+
+# ── Load next page of results ─────────────────────────────────────────────────
+
+def show_more_results(results: list, page: int, wardrobe_choice: str, style_goal: str):
+    """Reveal the next PAGE_SIZE results and auto-switch to the first new item."""
+    new_visible = page + PAGE_SIZE
+    n = len(results)
+    visible = min(new_visible, n)
+    choices = [str(i + 1) for i in range(visible)]
+
+    # Auto-switch to the first item of the newly revealed page
+    new_idx = page  # page = last visible count → index of first new item
+    item = results[new_idx] if new_idx < n else results[0]
+
+    wardrobe   = get_example_wardrobe() if wardrobe_choice == "Demo wardrobe" else get_empty_wardrobe()
+    clean_goal = style_goal.strip() if style_goal and style_goal.strip() else None
+    outfit  = suggest_outfit(item, wardrobe, style_goal=clean_goal)
+    fitcard = create_fit_card(outfit, item)
+
+    has_more = visible < n
+    return (
+        _format_listing_html(item),
+        _format_outfit_html(outfit),
+        fitcard,
+        gr.update(choices=choices, value=str(new_idx + 1), visible=True),
+        gr.update(visible=has_more, value=f"View {min(PAGE_SIZE, n - visible)} more results ↓" if has_more else ""),
+        new_visible,
+    )
+
+
 # ── Query handler ─────────────────────────────────────────────────────────────
 
 def handle_query(
     user_query: str,
     wardrobe_choice: str,
     style_goal: str,
-) -> tuple[str, str, str, str]:
-    """Returns (listing_html, outfit_html, fitcard_text, warning_html)."""
+    min_price: float | None,
+    max_price: float | None,
+):
+    """Returns (listing, outfit, fitcard, warning, count, results_state, nav, more_btn, page_state)."""
     if not user_query or not user_query.strip():
-        return "", "", "", ""
+        return "", "", "", "", "", [], gr.update(visible=False), gr.update(visible=False), 0
 
     wardrobe   = get_example_wardrobe() if wardrobe_choice == "Demo wardrobe" else get_empty_wardrobe()
     clean_goal = style_goal.strip() if style_goal and style_goal.strip() else None
@@ -910,6 +1279,8 @@ def handle_query(
         query=user_query.strip(),
         wardrobe=wardrobe,
         style_goal=clean_goal,
+        min_price=min_price or None,
+        max_price=max_price or None,
     )
 
     warning_html = (
@@ -917,15 +1288,32 @@ def handle_query(
         if session.get("warning") else ""
     )
 
+    results = session.get("search_results", [])
+    count   = len(results)
+    count_html = (
+        f'<div class="ff-count">{count} listing{"s" if count != 1 else ""} found on eBay</div>'
+        if count > 0 else ""
+    )
+
     if session["error"]:
         error_html = f'<div class="listing-error">{_html.escape(session["error"])}</div>'
-        return error_html, "", "", warning_html
+        return error_html, "", "", warning_html, count_html, [], gr.update(visible=False), gr.update(visible=False), 0
 
+    n = len(results)
+    initial_visible = min(PAGE_SIZE, n)
+    choices = [str(i + 1) for i in range(initial_visible)]
+    has_more = n > PAGE_SIZE
+    more_label = f"View {min(PAGE_SIZE, n - PAGE_SIZE)} more results ↓" if has_more else ""
     return (
-        _format_listing_html(session["selected_item"]),
+        _format_listing_html(results[0]),
         _format_outfit_html(session["outfit_suggestion"]),
         session["fit_card"] or "",
         warning_html,
+        count_html,
+        results,
+        gr.update(choices=choices, value="1", visible=n > 1),
+        gr.update(visible=has_more, value=more_label),
+        initial_visible,
     )
 
 
@@ -933,11 +1321,11 @@ def handle_query(
 
 # [query, wardrobe_choice, style_goal]
 EXAMPLE_QUERIES = [
-    ["vintage graphic tee under $30",        "Demo wardrobe", "90s streetwear"],
-    ["oversized blazer size M under $60",    "Demo wardrobe", "dark academia"],
-    ["flowy midi skirt under $40",           "Demo wardrobe", "cottagecore"],
-    ["black combat boots size 8",            "No wardrobe",   "grunge"],
-    ["cozy knit cardigan under $50",         "Demo wardrobe", "dark academia"],
+    ["vintage graphic tee",              "Demo wardrobe", "90s streetwear", None, 30],
+    ["oversized blazer size M",          "Demo wardrobe", "dark academia",  None, 60],
+    ["flowy midi skirt",                 "Demo wardrobe", "cottagecore",    None, 40],
+    ["black combat boots size 8",        "No wardrobe",   "grunge",         None, None],
+    ["cozy knit cardigan",               "Demo wardrobe", "dark academia",  None, 50],
 ]
 
 
@@ -981,15 +1369,49 @@ def build_interface():
                 lines=1,
                 elem_id="ff-style-goal",
             )
+            with gr.Row(elem_id="ff-price-row"):
+                min_price_input = gr.Number(
+                    label="Min price ($)",
+                    value=None,
+                    minimum=0,
+                    precision=0,
+                    elem_id="ff-min-price",
+                )
+                max_price_input = gr.Number(
+                    label="Max price ($)",
+                    value=None,
+                    minimum=0,
+                    precision=0,
+                    elem_id="ff-max-price",
+                )
 
         # Non-fatal warning (e.g. borderline query) shown between search and results
         warning_output = gr.HTML(elem_id="ff-warning")
 
         submit_btn = gr.Button("Find it", variant="primary", size="lg", elem_id="ff-submit")
+        count_output = gr.HTML(elem_id="ff-count")
 
-        with gr.Row(equal_height=True):
+        results_state = gr.State([])
+        page_state    = gr.State(0)
+
+        with gr.Row(equal_height=False):
             with gr.Column(elem_classes=["output-card"]):
                 gr.HTML('<span class="card-label">Top listing found</span>')
+                result_nav = gr.Radio(
+                    choices=["1"],
+                    value="1",
+                    show_label=False,
+                    container=False,
+                    elem_id="ff-result-nav",
+                    visible=False,
+                    interactive=True,
+                )
+                more_btn = gr.Button(
+                    "View more results ↓",
+                    visible=False,
+                    elem_id="ff-more-btn",
+                    size="sm",
+                )
                 listing_output = gr.HTML(elem_id="ff-listing")
 
             with gr.Column(elem_classes=["output-card"]):
@@ -1002,17 +1424,42 @@ def build_interface():
 
         gr.Examples(
             examples=EXAMPLE_QUERIES,
-            inputs=[query_input, wardrobe_choice, style_goal_input],
+            inputs=[query_input, wardrobe_choice, style_goal_input, min_price_input, max_price_input],
             label="Try these searches",
         )
 
         # ── event wiring ──────────────────────────────────────────────────────
 
-        _inputs  = [query_input, wardrobe_choice, style_goal_input]
-        _outputs = [listing_output, outfit_output, fitcard_output, warning_output]
+        _inputs  = [query_input, wardrobe_choice, style_goal_input, min_price_input, max_price_input]
+        _outputs = [listing_output, outfit_output, fitcard_output, warning_output, count_output,
+                    results_state, result_nav, more_btn, page_state]
 
-        submit_btn.click(fn=handle_query, inputs=_inputs, outputs=_outputs)
-        query_input.submit(fn=handle_query, inputs=_inputs, outputs=_outputs)
+        # show_progress="minimal" — Gradio's default per-component "processing | Xs"
+        # badge (the .eta-bar/.progress-text status tracker) can get visually stuck
+        # on Radio components after the request completes, blocking pill clicks and
+        # rendering in Gradio's default colors regardless of our CSS overrides.
+        # "minimal" swaps it for a thin top-of-page bar that clears reliably and
+        # never overlaps the pill row.
+        submit_btn.click(fn=handle_query, inputs=_inputs, outputs=_outputs, show_progress="minimal")
+        query_input.submit(fn=handle_query, inputs=_inputs, outputs=_outputs, show_progress="minimal")
+
+        # .input() (not .change()) — fires only on direct user clicks, not on the
+        # programmatic gr.update(value=...) that handle_query/show_more_results
+        # already use to set the pill. Using .change() here double-fires
+        # switch_result (redundant LLM calls) every time a search runs.
+        result_nav.input(
+            fn=switch_result,
+            inputs=[result_nav, results_state, wardrobe_choice, style_goal_input],
+            outputs=[listing_output, outfit_output, fitcard_output],
+            show_progress="minimal",
+        )
+
+        more_btn.click(
+            fn=show_more_results,
+            inputs=[results_state, page_state, wardrobe_choice, style_goal_input],
+            outputs=[listing_output, outfit_output, fitcard_output, result_nav, more_btn, page_state],
+            show_progress="minimal",
+        )
 
         wardrobe_choice.change(
             fn=_wardrobe_info_html,
