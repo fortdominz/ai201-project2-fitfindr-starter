@@ -16,7 +16,9 @@ The planning loop has a hard early exit: if search returns an empty list, the ag
 
 **What did you find in the listings dataset?**
 
-40 listings across 6 categories (tops, bottoms, outerwear, shoes, accessories, dresses) and multiple style aesthetics (vintage, y2k, grunge, cottagecore, streetwear, minimalist). Prices range from about $8 to $85. Sizes are non-standardized — some use "M", some "S/M", shoes use "US 8", pants use "W30 L30". That's why I implemented size filtering as a case-insensitive substring match (`"m" in listing["size"].lower()`) rather than exact match — it handles "M" matching "S/M" naturally.
+The project moved from a static mock dataset to the live eBay Browse API, so data exploration meant understanding what real eBay secondhand listings actually look like. The biggest finding was inconsistency: sizes are listed in every format imaginable — "M", "S/M", "US 8", "W30 L30", or not listed at all. That's why size filtering is implemented as a post-fetch case-insensitive substring match rather than an exact match, so "M" matches "S/M" naturally.
+
+Price data was reliable — eBay enforces it — but the `size` and `brand` fields frequently come back empty. Items without a size get normalized to `"Not listed"` so downstream tools always have a string to work with rather than a null. The other key finding: eBay's keyword matching is broad, so a vague query like "jacket" can return hundreds of unrelated results. That's what motivated adding an LLM keyword-generation step (`_generate_ebay_keywords`) that tightens the search terms before hitting the API.
 
 ---
 
@@ -24,9 +26,9 @@ The planning loop has a hard early exit: if search returns an empty list, the ag
 
 **What was the hardest tool to implement?**
 
-`suggest_outfit` had the most moving parts. The two-branch logic (empty wardrobe vs. populated wardrobe) required writing two distinct prompts, and formatting the wardrobe items into the prompt text in a readable way took some iteration. I format each item as `"- {name} ({category}, {colors}) — {notes}"` so the LLM can reference pieces by name naturally in its suggestions.
+`search_ebay` had the most moving parts. It required OAuth2 client credentials authentication with a token cached at module scope so it doesn't re-authenticate on every search, an LLM call to generate tighter eBay keywords from the user's natural language description, the actual eBay Browse API request with price and category filters, and then normalizing every returned item into a consistent schema. Any of those four steps failing in the wrong order would break the whole tool silently.
 
-The `search_listings` scoring loop looked simple but had a subtle decision: I drop zero-score items entirely rather than returning everything sorted. This matters — if a user searches "vintage tee" and there are listings that don't contain either word anywhere, they shouldn't appear at all, even at the bottom of the list.
+`suggest_outfit` was the second-hardest. The two-branch logic — empty wardrobe vs. populated wardrobe — required writing two distinct LLM prompts, and formatting wardrobe items into the prompt in a readable way took iteration. Each item is formatted as `"- {name} ({category}, {colors}) — {notes}"` so the LLM can reference pieces by name naturally in its output rather than just describing a vibe.
 
 ---
 
@@ -34,9 +36,9 @@ The `search_listings` scoring loop looked simple but had a subtle decision: I dr
 
 **How does your agent decide which tools to call?**
 
-The loop is linear with one conditional branch. It always runs: parse → search. If search returns anything, it continues: select → outfit → fit card → return. If search returns nothing, it stops immediately with an error message.
+The loop is linear with two hard conditional exits. It always runs: validate → parse → search. If `validate_query` returns `valid: False`, the agent sets `session["error"]` and returns immediately — no eBay call is made. If `search_ebay` returns an empty list, the agent sets `session["error"]` and returns again. Only when search returns results does the pipeline continue into `suggest_outfit` and `create_fit_card`.
 
-There's no dynamic replanning or backtracking — this agent doesn't decide mid-run to call a different tool based on what the previous one returned. The branching is purely structural: empty list = stop, non-empty list = continue. This is the right level of complexity for a three-step pipeline where each step's output type is always the same.
+There's no dynamic replanning or backtracking — this agent doesn't decide mid-run to call a different tool based on what the previous one returned. The branching is purely structural: invalid query = stop, empty results = stop, results found = continue. This is the right level of complexity for a pipeline where each step's output type is always the same.
 
 **What was the most important state management decision?**
 
@@ -49,8 +51,8 @@ Using a session dict as the single source of truth. Every tool in the chain rece
 **What three failure modes did you test, and what did the agent do?**
 
 **1. No search results:**
-Query: `"designer ballgown size XXS under $5"`
-Behavior: search_listings returns `[]` → agent sets `session["error"]` to "No listings found for 'designer ballgown', size XXS under $5. Try a broader description, raise your price limit, or remove the size filter." and returns immediately. The outfit and fit card panels in the UI are blank. No downstream tools are called.
+Query: `"vintage silk kimono size XXXL under $1"`
+Behavior: `search_ebay` returns `[]` — eBay has no listings matching that size and price combination → agent sets `session["error"]` to an actionable message ("Try a broader description, raise your price limit, or remove the size filter.") and returns immediately. The outfit and fit card panels in the UI are blank. No downstream tools are called.
 
 **2. Empty wardrobe:**
 Query: `"vintage graphic tee under $30"` with "Empty wardrobe (new user)" selected
@@ -91,8 +93,8 @@ The second lesson: deterministic LLM calls (temperature=0) for structured extrac
 
 | Milestone | What I used AI for | What I verified manually |
 |-----------|-------------------|--------------------------|
-| M1 Planning | Generated the architecture diagram structure | Read through all spec fields and confirmed they match the actual implementation |
-| M3 Tools | Generated `search_listings`, `suggest_outfit`, `create_fit_card` bodies from specs in planning.md | Ran 11 unit tests, confirmed price/size filtering, checked score ordering |
-| M4 Loop | Generated `run_agent()` body from planning.md architecture diagram | Ran `python agent.py` with both happy-path and no-results queries, confirmed session state |
-| M4 UI | Generated `handle_query()` body from the TODO docstring | Read through the output format, confirmed listing_text includes all required fields |
-| M6 README | First draft of all sections | Confirmed commands actually work, checked section completeness |
+| M1 Planning | Generated the architecture diagram and session dict schema | Read through all spec fields and confirmed they matched the planned function signatures |
+| M3 Tools | Generated `search_ebay`, `suggest_outfit`, `create_fit_card`, and `validate_query` bodies from specs in planning.md | Ran 11 unit tests; caught and fixed a bug where zero-score items weren't filtered before sorting; confirmed size/price filtering behavior |
+| M4 Loop | Generated `run_agent()` body from planning.md architecture diagram | Ran `python agent.py` with happy-path and no-results queries; caught missing early `return session` after error-set that caused crash on empty results |
+| M4 UI | Generated `handle_query()` and Gradio layout from the TODO docstrings | Verified all 9 output values wired correctly; confirmed pill nav and "View more" pagination work end-to-end |
+| M6 README + REFLECTION | First draft of all sections | Updated tool names from `search_listings` to `search_ebay`, corrected no-results test query, confirmed all commands still run |
